@@ -1,5 +1,7 @@
 # In-Browser Design AI
 
+![In-Browser Design AI Hero Image](./hero.png)
+
 **Your intelligent design companion, right in the browser.**
 
 Transform any webpage into your creative canvas. **In-Browser Design AI** brings the power of state-of-the-art LLMs (Gemini) directly into Chrome, allowing you to iterate on UI/UX, prototype changes, and get instant creative feedback without ever leaving the page.
