@@ -36,21 +36,14 @@ Get clean, standard Tailwind CSS or vanilla CSS output that you can copy-paste d
 npm install
 ```
 
-### 3. Setup Environment Variables
 
-Create a `.env` file in the root directory and add your API keys:
-
-```env
-VITE_GOOGLE_GENERATIVE_AI_API_KEY=your_api_key_here
-```
-
-### 4. Start development server
+### 3. Start development server
 
 ```bash
 npm run dev
 ```
 
-### 5. Load in Chrome
+### 4. Load in Chrome
 
 1. Open Chrome and navigate to `chrome://extensions/`.
 2. Enable "Developer mode" in the top right.
