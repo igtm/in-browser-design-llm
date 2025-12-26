@@ -1,18 +1,29 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { IoSend, IoSparkles, IoCameraOutline, IoCodeSlashOutline, IoSettingsOutline, IoExpandOutline, IoCloseCircleOutline, IoTimeOutline, IoChatbubbleEllipsesOutline, IoRefreshOutline, IoTrashOutline, IoCopyOutline, IoCheckmarkOutline, IoWarningOutline, IoImageOutline } from 'react-icons/io5'
-import { callGeminiDesign, DOMOperation, GeminiUsage } from './gemini'
+import { callGeminiDesign, DOMOperation, GeminiUsage, GeminiVariation } from './gemini'
 
 interface Message {
   role: 'user' | 'assistant' | 'system'
   content: string
-  summary?: string
   attachedImage?: string
   type?: 'error' | 'info'
+  variations?: GeminiVariation[] // Multi-variation support
+  // Legacy fields for backward compatibility/system messages
+  summary?: string
   operations?: DOMOperation[]
   undoOperations?: DOMOperation[]
   operationResults?: { selector: string, success: boolean, error?: string }[]
   rootSelector?: string
   usage?: GeminiUsage
+  suggestions?: string[] // Clickable prompt suggestions
+}
+
+interface ChatSession {
+  id: string
+  name: string
+  messages: Message[]
+  sessionBaseline: { html: string, screenshot: string | null } | null
+  estTokens: number
 }
 
 interface HistoryItem {
@@ -20,9 +31,11 @@ interface HistoryItem {
   timestamp: number
   url: string
   instruction: string
-  summary?: string
+  variations?: GeminiVariation[] // Multi-variation support
   attachedImage?: string
-  operations: DOMOperation[]
+  // Legacy fields
+  summary?: string
+  operations?: DOMOperation[]
   undoOperations?: DOMOperation[]
   operationResults?: { selector: string, success: boolean, error?: string }[]
   rootSelector?: string
@@ -49,7 +62,7 @@ const UsageStats: React.FC<{ usage: GeminiUsage }> = ({ usage }) => {
     </div>
   )
 }
- 
+
 const CopyButton: React.FC<{ content: any, className?: string }> = ({ content, className }) => {
   const [copied, setCopied] = useState(false)
 
@@ -63,9 +76,8 @@ const CopyButton: React.FC<{ content: any, className?: string }> = ({ content, c
   return (
     <button
       onClick={handleCopy}
-      className={`flex items-center gap-1 transition-all ${className} ${
-        copied ? 'text-green-500 hover:text-green-600' : ''
-      }`}
+      className={`flex items-center gap-1 transition-all ${className} ${copied ? 'text-green-500 hover:text-green-600' : ''
+        }`}
       title="Copy to clipboard"
     >
       {copied ? <IoCheckmarkOutline size={14} /> : <IoCopyOutline size={14} />}
@@ -74,13 +86,85 @@ const CopyButton: React.FC<{ content: any, className?: string }> = ({ content, c
   )
 }
 
+const TokenDonut: React.FC<{ current: number, max: number }> = ({ current, max }) => {
+  const percentage = Math.min(Math.round((current / max) * 100), 100)
+  const radius = 9
+  const circumference = 2 * Math.PI * radius
+  const offset = circumference - (percentage / 100) * circumference
+
+  let color = 'text-indigo-500'
+  if (percentage > 80) color = 'text-red-500'
+  else if (percentage > 50) color = 'text-amber-500'
+
+  return (
+    <div className="relative group flex items-center justify-center" title={`Est. ${current.toLocaleString()} / ${max.toLocaleString()} tokens`}>
+      <svg className="w-6 h-6 transform -rotate-90">
+        <circle
+          cx="12"
+          cy="12"
+          r={radius}
+          stroke="currentColor"
+          strokeWidth="3"
+          fill="transparent"
+          className="text-slate-100"
+        />
+        <circle
+          cx="12"
+          cy="12"
+          r={radius}
+          stroke="currentColor"
+          strokeWidth="3"
+          fill="transparent"
+          strokeDasharray={circumference}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+          className={`${color} transition-all duration-500 ease-out`}
+        />
+      </svg>
+      <div className="absolute opacity-0 group-hover:opacity-100 transition-opacity bg-slate-800 text-white text-[10px] py-1 px-2 rounded -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap z-50 pointer-events-none shadow-xl border border-slate-700">
+        {percentage}% ({current.toLocaleString()} / {max.toLocaleString()})
+      </div>
+    </div>
+  )
+}
+
+const VariationCard: React.FC<{
+  variation: GeminiVariation,
+  onApply: () => void,
+  isApplied: boolean,
+  loading: boolean
+}> = ({ variation, onApply, isApplied, loading }) => {
+  return (
+    <div className={`p-4 rounded-2xl border transition-all duration-300 w-64 flex-shrink-0 ${isApplied
+      ? 'bg-indigo-50 border-indigo-200 shadow-md ring-2 ring-indigo-500 ring-offset-2'
+      : 'bg-white border-slate-200 hover:border-indigo-300 hover:shadow-lg'
+      }`}>
+      <div className="flex items-center justify-between mb-2">
+        <h4 className="text-sm font-bold text-slate-800 line-clamp-1">{variation.title}</h4>
+        {isApplied && <span className="text-[10px] font-bold text-indigo-600 bg-indigo-100 px-2 py-0.5 rounded-full uppercase">Applied</span>}
+      </div>
+      <p className="text-[11px] text-slate-500 mb-4 line-clamp-3 leading-relaxed">
+        {variation.summary}
+      </p>
+      <button
+        onClick={onApply}
+        disabled={loading}
+        className={`w-full py-2 rounded-xl text-xs font-bold transition-all ${isApplied
+          ? 'bg-rose-50 text-rose-600 border border-rose-200 hover:bg-rose-100 active:scale-95'
+          : 'bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 shadow-lg shadow-indigo-100'
+          }`}
+      >
+        {isApplied ? 'Undo Design' : 'Apply Design'}
+      </button>
+    </div>
+  )
+}
+
 const App: React.FC = () => {
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'assistant', content: 'Hello! I can help you design this page. Give me an instruction!' }
-  ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [apiKey, setApiKey] = useState('')
+  const [modelName, setModelName] = useState('gemini-2.0-flash-exp')
   const [selectedElement, setSelectedElement] = useState<{ selector: string, html: string } | null>(null)
   const [selecting, setSelecting] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -91,15 +175,119 @@ const App: React.FC = () => {
   const [filterByDomain, setFilterByDomain] = useState(true)
   const [activeUrl, setActiveUrl] = useState('')
   const [attachedImage, setAttachedImage] = useState<string | null>(null)
+
+  const DEFAULT_SUGGESTIONS = [
+    'Give me 3 creative variations to make this page look more modern and premium',
+    'Improve the current design by refining the typography and layout for a professional look',
+    'Transform this page into a sleek dark mode theme with neon accents'
+  ]
+
+  const [sessions, setSessions] = useState<ChatSession[]>([
+    {
+      id: 'default',
+      name: 'Chat 1',
+      messages: [{
+        role: 'assistant',
+        content: 'Hello! I can help you design this page. Give me an instruction!',
+        suggestions: DEFAULT_SUGGESTIONS
+      }],
+      sessionBaseline: null,
+      estTokens: 0
+    }
+  ])
+  const [activeSessionId, setActiveSessionId] = useState('default')
+
+  const activeSession = sessions.find(s => s.id === activeSessionId) || sessions[0]
+  const messages = activeSession.messages
+  const sessionBaseline = activeSession.sessionBaseline
+  const estTokens = activeSession.estTokens
+
+  const MAX_TOKENS = 1000000
+  const MAX_SESSIONS = 6
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [appliedVariationId, setAppliedVariationId] = useState<string | null>(null)
 
   const loadSettings = () => {
-    chrome.storage.local.get(['geminiApiKey', 'history', 'sendScreenshot', 'filterByDomain'], (result) => {
+    chrome.storage.local.get(['geminiApiKey', 'history', 'sendScreenshot', 'filterByDomain', 'sessions', 'activeSessionId'], (result) => {
       setApiKey((result.geminiApiKey as string) || '')
       if (result.history) setHistory(result.history as HistoryItem[])
       if (result.sendScreenshot !== undefined) setSendScreenshot(result.sendScreenshot as boolean)
       if (result.filterByDomain !== undefined) setFilterByDomain(result.filterByDomain as boolean)
+      if (result.sessions) setSessions(result.sessions as ChatSession[])
+      if (result.activeSessionId) setActiveSessionId(result.activeSessionId as string)
+      if (result.geminiModelName) setModelName(result.geminiModelName as string)
     })
+  }
+
+  const updateActiveSession = (update: Partial<ChatSession> | ((prev: ChatSession) => ChatSession)) => {
+    setSessions(prev => {
+      const newSessions = prev.map(s => {
+        if (s.id === activeSessionId) {
+          return typeof update === 'function' ? update(s) : { ...s, ...update }
+        }
+        return s
+      })
+      return newSessions
+    })
+  }
+
+  const setMessages = (updateFn: (prev: Message[]) => Message[]) => {
+    updateActiveSession(prev => ({
+      ...prev,
+      messages: updateFn(prev.messages)
+    }))
+  }
+
+  const setSessionBaseline = (baseline: { html: string, screenshot: string | null } | null) => {
+    updateActiveSession({ sessionBaseline: baseline })
+  }
+
+  const setEstTokens = (tokens: number) => {
+    updateActiveSession({ estTokens: tokens })
+  }
+
+  const createNewSession = () => {
+    if (sessions.length >= MAX_SESSIONS) return
+    const newId = Date.now().toString()
+    const newSession: ChatSession = {
+      id: newId,
+      name: `Chat ${sessions.length + 1}`,
+      messages: [{
+        role: 'assistant',
+        content: 'Hello! I can help you design this page. Give me an instruction!',
+        suggestions: DEFAULT_SUGGESTIONS
+      }],
+      sessionBaseline: null,
+      estTokens: 0
+    }
+    const newSessions = [...sessions, newSession]
+    setSessions(newSessions)
+    setActiveSessionId(newId)
+  }
+
+  useEffect(() => {
+    if (sessions.length > 0) {
+      chrome.storage.local.set({ sessions, activeSessionId })
+    }
+  }, [sessions, activeSessionId])
+
+  const deleteSession = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (sessions.length <= 1) return
+    const newSessions = sessions.filter(s => s.id !== id)
+    setSessions(newSessions)
+    if (activeSessionId === id) {
+      const remainingId = newSessions[0].id
+      setActiveSessionId(remainingId)
+      chrome.storage.local.set({ sessions: newSessions, activeSessionId: remainingId })
+    } else {
+      chrome.storage.local.set({ sessions: newSessions })
+    }
+  }
+
+  const switchSession = (id: string) => {
+    setActiveSessionId(id)
+    chrome.storage.local.set({ activeSessionId: id })
   }
 
   useEffect(() => {
@@ -132,16 +320,22 @@ const App: React.FC = () => {
     })
 
     const handleStorageChange = (changes: { [key: string]: chrome.storage.StorageChange }) => {
+      if (changes.geminiModelName?.newValue) {
+        setModelName(changes.geminiModelName.newValue as string);
+      }
+      if (changes.geminiApiKey?.newValue) {
+        setApiKey(changes.geminiApiKey.newValue as string);
+      }
       if (changes.selectedElement?.newValue) {
         const data = changes.selectedElement.newValue as { selector: string, html: string };
         setSelectedElement({ selector: data.selector, html: data.html });
         setSelecting(false);
-        setMessages(prev => [...prev, { 
-          role: 'system', 
+        setMessages(prev => [...prev, {
+          role: 'system',
           type: 'info',
-          content: `Focused on element: ${data.selector}` 
+          content: `Focused on element: ${data.selector}`
         }]);
-        
+
         // Clear selection from storage after picking it up to avoid re-triggering on reload
         // but keep it in component state
         chrome.storage.local.remove('selectedElement');
@@ -156,7 +350,7 @@ const App: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown)
     chrome.storage.onChanged.addListener(handleStorageChange);
-    
+
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
       chrome.storage.onChanged.removeListener(handleStorageChange);
@@ -164,6 +358,39 @@ const App: React.FC = () => {
       chrome.tabs.onUpdated.removeListener(handleTabUpdated);
     }
   }, [selecting])
+
+  useEffect(() => {
+    // Estimate tokens
+    const estimateTokens = () => {
+      let text = input
+      messages.forEach(m => {
+        text += m.content
+      })
+
+      // Rough estimate: 4 chars per token
+      let count = Math.ceil(text.length / 4)
+
+      // Add image tokens (1120 per image)
+      if (attachedImage) count += 1120
+      if (sendScreenshot) count += 1120
+
+      // Add historical image tokens if any (keeping it simple for now)
+      messages.forEach(m => {
+        if (m.attachedImage) count += 1120
+      })
+
+      // Add baseline HTML tokens if session started
+      if (sessionBaseline) {
+        count += Math.ceil(sessionBaseline.html.length / 4)
+      } else {
+        // If not started, the next capture will add tokens
+        // We can't know exactly yet, but we'll update after first send
+      }
+
+      setEstTokens(count)
+    }
+    estimateTokens()
+  }, [input, messages, attachedImage, sendScreenshot, sessionBaseline])
 
   useEffect(() => {
     // Auto-scroll
@@ -213,10 +440,10 @@ const App: React.FC = () => {
       } catch (innerErr: any) {
         console.error('Failed to start selection:', innerErr)
         setSelecting(false)
-        setMessages(prev => [...prev, { 
-          role: 'system', 
+        setMessages(prev => [...prev, {
+          role: 'system',
           type: 'error',
-          content: innerErr.message || 'Connection failed.' 
+          content: innerErr.message || 'Connection failed.'
         }])
       }
     }
@@ -249,7 +476,7 @@ const App: React.FC = () => {
         }
         return { fullHtml, targetHtml }
       },
-      args: [selectedElement?.selector]
+      args: [selectedElement?.selector || ""]
     })
 
     const { fullHtml, targetHtml } = results[0].result as { fullHtml: string, targetHtml: string | null }
@@ -282,7 +509,7 @@ const App: React.FC = () => {
         ops.forEach(op => {
           try {
             let el: HTMLElement | null = null
-            
+
             if (op.selector === ':scope' || op.selector === '') {
               el = root as HTMLElement
             } else if (root) {
@@ -353,7 +580,7 @@ const App: React.FC = () => {
         })
         return { undoOps, results }
       },
-      args: [ops, rootSelector],
+      args: [ops, rootSelector || ""],
     })
     return (response[0].result as { undoOps: DOMOperation[], results: any[] }) || { undoOps: [], results: [] }
   }
@@ -379,10 +606,25 @@ const App: React.FC = () => {
     })
   }
 
-  const handleSend = async () => {
-    if (!input.trim() || !apiKey) return
+  const handleSuggestionSend = (suggestion: string) => {
+    setInput(suggestion)
+    handleSend(suggestion)
+  }
 
-    const userMsg = input.trim()
+  const handleSend = async (overrideInput?: string) => {
+    const userMsg = (overrideInput || input).trim()
+    if (!userMsg || !apiKey) return
+
+    // 1M Token Limit Check
+    if (estTokens > MAX_TOKENS) {
+      setMessages(prev => [...prev, {
+        role: 'system',
+        type: 'error',
+        content: `Error: Token limit exceeded (${estTokens.toLocaleString()} / ${MAX_TOKENS.toLocaleString()}). Please clear the chat to start a new session.`
+      }])
+      return
+    }
+
     const currentAttachedImage = attachedImage
     setInput('')
     setAttachedImage(null)
@@ -390,12 +632,17 @@ const App: React.FC = () => {
     setLoading(true)
 
     try {
-      const context = await captureContext()
-      if (!context) throw new Error('Could not capture page context')
+      // Use existing baseline or capture a new one
+      let currentBaseline = sessionBaseline
+      if (!currentBaseline) {
+        const context = await captureContext()
+        if (!context) throw new Error('Could not capture page context')
+        currentBaseline = { html: context.html, screenshot: context.screenshot }
+        setSessionBaseline(currentBaseline)
+      }
 
-      const result = await chrome.storage.local.get(['customSystemPrompt', 'geminiModelName'])
+      const result = await chrome.storage.local.get(['customSystemPrompt'])
       const customPrompt = result.customSystemPrompt as string | undefined
-      const modelName = result.geminiModelName as string | undefined
 
       const historyForGemini: any[] = messages
         .filter(m => m.role === 'user' || m.role === 'assistant')
@@ -405,34 +652,85 @@ const App: React.FC = () => {
           operationResults: m.operationResults
         }))
 
-      const { operations, usage, summary } = await callGeminiDesign(apiKey, context.html, context.screenshot, userMsg, historyForGemini, currentAttachedImage, customPrompt, modelName)
-      
-      const { undoOps, results } = await applyOperations(operations, selectedElement?.selector)
-      saveToHistory(userMsg, operations, undoOps, selectedElement?.selector, usage, results, summary, currentAttachedImage)
-      const hasErrors = results.some(r => !r.success)
+      // Gemini now receives the BASELINE HTML and the full history
+      const { variations, usage } = await callGeminiDesign(
+        apiKey,
+        currentBaseline.html,
+        currentBaseline.screenshot,
+        userMsg,
+        historyForGemini,
+        currentAttachedImage,
+        customPrompt,
+        modelName
+      )
 
-      if (hasErrors) {
-        console.error('[In-Browser Design] Some operations failed:', results.filter(r => !r.success))
-      }
-
-      setMessages(prev => [...prev, { 
-        role: 'assistant', 
-        content: hasErrors 
-          ? `Applied ${results.filter(r => r.success).length}/${operations.length} changes. Some operations failed.` 
-          : summary || `Applied ${operations.length} changes to the page!`,
-        summary: summary,
-        operations: operations,
-        undoOperations: undoOps,
-        operationResults: results,
-        rootSelector: selectedElement?.selector,
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `I've generated ${variations.length} design variation${variations.length > 1 ? 's' : ''} for you.`,
+        variations: variations,
         usage: usage
       }])
     } catch (err: any) {
-      setMessages(prev => [...prev, { 
-        role: 'system', 
+      setMessages(prev => [...prev, {
+        role: 'system',
         type: 'error',
-        content: `Error: ${err.message}` 
+        content: `Error: ${err.message}`
       }])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleApplyVariation = async (msgIndex: number, variationIndex: number) => {
+    const msg = messages[msgIndex]
+    if (!msg || !msg.variations) return
+    const variation = msg.variations[variationIndex]
+    if (!variation) return
+
+    const isCurrentlyApplied = appliedVariationId === `${msgIndex}-${variationIndex}`
+
+    setLoading(true)
+    try {
+      if (isCurrentlyApplied) {
+        // UNDO PATH
+        if (msg.undoOperations) {
+          await applyOperations(msg.undoOperations, msg.rootSelector)
+        }
+
+        // Clear metadata from message
+        setMessages(prev => prev.map((m, i) => i === msgIndex ? {
+          ...m,
+          undoOperations: undefined,
+          operationResults: undefined,
+          rootSelector: undefined
+        } : m))
+
+        setAppliedVariationId(null)
+      } else {
+        // APPLY PATH
+        // 1. Revert previous state if any
+        const lastAppliedMsg = [...messages].reverse().find(m => m.role === 'assistant' && m.undoOperations && m.undoOperations.length > 0)
+        if (lastAppliedMsg && lastAppliedMsg.undoOperations) {
+          await applyOperations(lastAppliedMsg.undoOperations, lastAppliedMsg.rootSelector)
+        }
+
+        // 2. Apply new operations
+        const { undoOps, results } = await applyOperations(variation.operations, selectedElement?.selector)
+
+        // 3. Update history and message state
+        setMessages(prev => prev.map((m, i) => i === msgIndex ? {
+          ...m,
+          undoOperations: undoOps,
+          operationResults: results,
+          rootSelector: selectedElement?.selector
+        } : m))
+
+        setAppliedVariationId(`${msgIndex}-${variationIndex}`)
+
+        saveToHistory(activeSession.messages[msgIndex - 1]?.content || 'Design Update', variation.operations, undoOps, selectedElement?.selector, msg.usage, results, variation.summary, activeSession.messages[msgIndex - 1]?.attachedImage)
+      }
+    } catch (err: any) {
+      console.error('Failed to handle variation:', err)
     } finally {
       setLoading(false)
     }
@@ -472,14 +770,14 @@ const App: React.FC = () => {
         <h2 className="text-xl font-bold text-slate-800 mb-2">API Key Required</h2>
         <p className="text-sm text-slate-500 mb-6">Please set your Gemini API Key in the settings page to start designing.</p>
         <div className="flex flex-col gap-2 w-full max-w-xs">
-          <button 
+          <button
             onClick={() => chrome.runtime.openOptionsPage()}
             className="w-full px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
           >
             <IoSettingsOutline size={18} />
             Open Settings
           </button>
-          <button 
+          <button
             onClick={loadSettings}
             className="w-full px-6 py-3 bg-white text-slate-600 border border-slate-200 rounded-2xl font-bold hover:bg-slate-50 transition-all flex items-center justify-center gap-2"
           >
@@ -501,29 +799,27 @@ const App: React.FC = () => {
           </div>
           <h1 className="font-bold text-slate-900">In-Browser Design</h1>
         </div>
-        
+
         <div className="flex bg-slate-100 p-1 rounded-xl">
-          <button 
+          <button
             onClick={() => setActiveTab('chat')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
-              activeTab === 'chat' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-            }`}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${activeTab === 'chat' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+              }`}
           >
             <IoChatbubbleEllipsesOutline size={14} />
             Chat
           </button>
-          <button 
+          <button
             onClick={() => setActiveTab('history')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
-              activeTab === 'history' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-            }`}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${activeTab === 'history' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+              }`}
           >
             <IoTimeOutline size={14} />
             History
           </button>
         </div>
 
-        <button 
+        <button
           onClick={() => chrome.runtime.openOptionsPage()}
           className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-slate-50 rounded-lg transition-all"
           title="Open Settings"
@@ -532,27 +828,88 @@ const App: React.FC = () => {
         </button>
       </div>
 
+      {/* Tabs */}
+      <div className="px-4 py-2 bg-white border-b border-slate-200 flex items-center gap-2 overflow-x-auto no-scrollbar">
+        {sessions.map((session) => (
+          <div
+            key={session.id}
+            onClick={() => switchSession(session.id)}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold cursor-pointer transition-all whitespace-nowrap border ${activeSessionId === session.id
+              ? 'bg-indigo-50 text-indigo-600 border-indigo-100 shadow-sm'
+              : 'bg-white text-slate-500 border-transparent hover:bg-slate-50 hover:text-slate-700'
+              }`}
+          >
+            {session.name}
+            {sessions.length > 1 && (
+              <button
+                onClick={(e) => deleteSession(session.id, e)}
+                className="hover:text-red-500 p-0.5 rounded-md hover:bg-red-50"
+              >
+                <IoCloseCircleOutline size={12} />
+              </button>
+            )}
+          </div>
+        ))}
+        {sessions.length < MAX_SESSIONS && (
+          <button
+            onClick={createNewSession}
+            className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-dashed border-slate-200 rounded-xl transition-all"
+            title="New Chat"
+          >
+            <IoSend size={14} className="rotate-[-90deg]" /> {/* Using a plus-like icon if IoAdd is missing, let me check icons */}
+          </button>
+        )}
+      </div>
+
       {/* Content */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {activeTab === 'chat' ? (
           <div className="p-4 space-y-4">
             {messages.map((msg, i) => (
               <div key={i} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                <div className={`max-w-[90%] px-4 py-2 rounded-2xl text-sm ${
-                  msg.role === 'user' 
-                    ? 'bg-indigo-600 text-white shadow-md' 
-                    : msg.role === 'system'
+                <div className={`max-w-[90%] px-4 py-2 rounded-2xl text-sm ${msg.role === 'user'
+                  ? 'bg-indigo-600 text-white shadow-md'
+                  : msg.role === 'system'
                     ? msg.type === 'error'
                       ? 'bg-red-50 text-red-600 border border-red-100 italic'
                       : 'bg-indigo-50 text-indigo-700 border border-indigo-100 font-medium'
                     : 'bg-white text-slate-700 border border-slate-200 shadow-sm'
-                }`}>
+                  }`}>
                   {msg.attachedImage && (
                     <div className="mb-2 rounded-lg overflow-hidden border border-white/20">
                       <img src={msg.attachedImage} alt="Reference" className="max-w-full h-auto max-h-[200px]" />
                     </div>
                   )}
                   {msg.content}
+
+                  {msg.suggestions && msg.suggestions.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mt-4">
+                      {msg.suggestions.map((suggestion, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => handleSuggestionSend(suggestion)}
+                          className="bg-white/80 hover:bg-white text-indigo-600 border border-indigo-100 px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all shadow-sm active:scale-95"
+                        >
+                          {suggestion}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {msg.variations && msg.variations.length > 0 && (
+                    <div className="flex gap-4 mt-4 overflow-x-auto pb-4 no-scrollbar -mx-2 px-2">
+                      {msg.variations.map((v, vIdx) => (
+                        <VariationCard
+                          key={vIdx}
+                          variation={v}
+                          isApplied={appliedVariationId === `${i}-${vIdx}`}
+                          loading={loading}
+                          onApply={() => handleApplyVariation(i, vIdx)}
+                        />
+                      ))}
+                    </div>
+                  )}
+
                   {msg.usage && <UsageStats usage={msg.usage} />}
                 </div>
                 {msg.operations && (
@@ -563,7 +920,7 @@ const App: React.FC = () => {
                         Errors detected
                       </div>
                     )}
-                    <button 
+                    <button
                       onClick={async () => {
                         const { results } = await applyOperations(msg.operations!, msg.rootSelector)
                         if (results.some(r => !r.success)) {
@@ -577,7 +934,7 @@ const App: React.FC = () => {
                       Re-apply changes
                     </button>
                     {msg.undoOperations && msg.undoOperations.length > 0 && (
-                      <button 
+                      <button
                         onClick={() => applyOperations(msg.undoOperations!, msg.rootSelector)}
                         className="flex items-center gap-1 text-[10px] font-bold text-slate-600 hover:text-red-600 bg-slate-100 hover:bg-red-50 px-2 py-1 rounded-full transition-colors"
                       >
@@ -585,8 +942,8 @@ const App: React.FC = () => {
                         Undo
                       </button>
                     )}
-                    <CopyButton 
-                      content={msg.operations} 
+                    <CopyButton
+                      content={msg.operations}
                       className="flex items-center gap-1 text-[10px] font-bold text-slate-600 hover:text-indigo-600 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-full"
                     />
                   </div>
@@ -597,7 +954,7 @@ const App: React.FC = () => {
               <div className="flex justify-start">
                 <div className="bg-white border border-slate-200 px-4 py-2 rounded-2xl shadow-sm animate-pulse flex items-center gap-2 text-slate-400 text-sm">
                   <IoSparkles className="animate-spin" />
-                  Thinking...
+                  Thinking... <span className="text-[10px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{modelName}</span>
                 </div>
               </div>
             )}
@@ -614,18 +971,17 @@ const App: React.FC = () => {
                   <p className="text-[10px] text-slate-400 mt-1">Manage your design iterations</p>
                 </div>
               </div>
-              
-              <button 
+
+              <button
                 onClick={() => {
                   const newValue = !filterByDomain
                   setFilterByDomain(newValue)
                   chrome.storage.local.set({ filterByDomain: newValue })
                 }}
-                className={`px-3 py-1.5 rounded-xl text-[10px] font-bold transition-all border ${
-                  filterByDomain 
-                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-100' 
-                    : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
-                }`}
+                className={`px-3 py-1.5 rounded-xl text-[10px] font-bold transition-all border ${filterByDomain
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-100'
+                  : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                  }`}
               >
                 {filterByDomain ? 'Current Domain' : 'All Domains'}
               </button>
@@ -633,14 +989,14 @@ const App: React.FC = () => {
 
             {(() => {
               const currentHostname = activeUrl ? new URL(activeUrl).hostname : ''
-              const filteredHistory = filterByDomain 
+              const filteredHistory = filterByDomain
                 ? history.filter(item => {
-                    try {
-                      return new URL(item.url).hostname === currentHostname
-                    } catch {
-                      return false
-                    }
-                  })
+                  try {
+                    return new URL(item.url).hostname === currentHostname
+                  } catch {
+                    return false
+                  }
+                })
                 : history
 
               if (filteredHistory.length === 0) {
@@ -657,11 +1013,11 @@ const App: React.FC = () => {
                   <div className="flex justify-between items-start mb-2">
                     <span className="text-[10px] text-slate-400 font-mono truncate max-w-[150px]">{new URL(item.url).hostname}</span>
                     <div className="flex items-center gap-2">
-                      <CopyButton 
-                        content={item.operations} 
+                      <CopyButton
+                        content={item.operations}
                         className="text-slate-300 hover:text-indigo-500 transition-colors text-[10px] font-bold"
                       />
-                      <button 
+                      <button
                         onClick={() => {
                           const newHistory = history.filter(h => h.id !== item.id)
                           setHistory(newHistory)
@@ -677,10 +1033,11 @@ const App: React.FC = () => {
                   <p className="text-xs text-slate-700 font-bold mb-1 line-clamp-2">"{item.instruction}"</p>
                   {item.usage && <UsageStats usage={item.usage} />}
                   <div className="mt-3 flex gap-2">
-                    <button 
+                    <button
                       onClick={async () => {
-                        const { results } = await applyOperations(item.operations, item.rootSelector)
-                        
+                        const ops = item.variations && item.variations.length > 0 ? item.variations[0].operations : (item.operations || [])
+                        const { results } = await applyOperations(ops, item.rootSelector)
+
                         // Also show a temporary system message and log to console if there are errors
                         if (results.some(r => !r.success)) {
                           console.error('[In-Browser Design] History design apply failed:', results.filter(r => !r.success))
@@ -690,7 +1047,7 @@ const App: React.FC = () => {
                             content: `Re-apply from history encountered ${results.filter(r => !r.success).length} errors.`
                           }])
                         }
-                        
+
                         const newHistory = history.map(h => h.id === item.id ? { ...h, operationResults: results } : h)
                         setHistory(newHistory)
                         chrome.storage.local.set({ history: newHistory })
@@ -704,7 +1061,7 @@ const App: React.FC = () => {
                       Apply Design
                     </button>
                     {item.undoOperations && item.undoOperations.length > 0 && (
-                      <button 
+                      <button
                         onClick={() => applyOperations(item.undoOperations!, item.rootSelector)}
                         className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-slate-100 text-slate-600 rounded-xl text-[11px] font-black uppercase tracking-wider hover:bg-red-50 hover:text-red-600 transition-colors"
                       >
@@ -722,18 +1079,17 @@ const App: React.FC = () => {
 
       {/* Input Section */}
       <div className="p-4 bg-white border-t border-slate-200 shadow-[0_-4px_12px_rgba(0,0,0,0.03)] space-y-3">
-        <div className={`flex flex-col border rounded-3xl transition-all duration-300 ${
-          selecting 
-            ? 'border-indigo-500 ring-4 ring-indigo-50 shadow-lg' 
-            : 'border-slate-200 bg-slate-50 focus-within:bg-white focus-within:border-indigo-400 focus-within:ring-4 focus-within:ring-indigo-50 shadow-sm hover:shadow-md'
-        }`}>
+        <div className={`flex flex-col border rounded-3xl transition-all duration-300 ${selecting
+          ? 'border-indigo-500 ring-4 ring-indigo-50 shadow-lg'
+          : 'border-slate-200 bg-slate-50 focus-within:bg-white focus-within:border-indigo-400 focus-within:ring-4 focus-within:ring-indigo-50 shadow-sm hover:shadow-md'
+          }`}>
           {/* Attachment chip for selected element */}
           <div className="px-4 pt-3 flex flex-wrap gap-2">
             {selectedElement && (
               <div className="flex items-center gap-2 bg-indigo-600 text-white pl-2.5 pr-1.5 py-1.5 rounded-full text-[11px] font-bold shadow-sm animate-in zoom-in-95 duration-200">
                 <IoExpandOutline size={12} className="shrink-0" />
                 <span className="truncate max-w-[160px] font-mono leading-none tracking-tight">{selectedElement.selector}</span>
-                <button 
+                <button
                   onClick={() => setSelectedElement(null)}
                   className="p-0.5 hover:bg-white/20 rounded-full transition-colors"
                 >
@@ -741,14 +1097,14 @@ const App: React.FC = () => {
                 </button>
               </div>
             )}
-            
+
             {attachedImage && (
               <div className="flex items-center gap-2 bg-slate-200 text-slate-700 pl-2 pr-1.5 py-1.5 rounded-xl text-[11px] font-bold shadow-sm animate-in zoom-in-95 duration-200 group">
                 <div className="w-6 h-6 rounded bg-slate-300 overflow-hidden shrink-0">
                   <img src={attachedImage} alt="Attached" className="w-full h-full object-cover" />
                 </div>
                 <span className="truncate max-w-[120px]">User image</span>
-                <button 
+                <button
                   onClick={() => setAttachedImage(null)}
                   className="p-0.5 hover:bg-slate-300 rounded-full transition-colors"
                 >
@@ -756,12 +1112,12 @@ const App: React.FC = () => {
                 </button>
               </div>
             )}
-            
+
             {(selectedElement || attachedImage) && (
               <span className="text-[10px] text-slate-400 font-medium self-center">Context attached</span>
             )}
           </div>
-          
+
           <div className="px-4 py-2">
             <textarea
               value={input}
@@ -781,18 +1137,17 @@ const App: React.FC = () => {
           </div>
 
           <div className="px-3 pb-3 flex items-center justify-between border-t border-slate-100/50">
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-2">
               <button
                 onClick={() => {
                   const newValue = !sendScreenshot
                   setSendScreenshot(newValue)
                   chrome.storage.local.set({ sendScreenshot: newValue })
                 }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-bold transition-all ${
-                  sendScreenshot 
-                    ? 'bg-indigo-50 text-indigo-600 border border-indigo-100' 
-                    : 'bg-slate-50 text-slate-400 border border-slate-100'
-                }`}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-bold transition-all ${sendScreenshot
+                  ? 'bg-indigo-50 text-indigo-600 border border-indigo-100'
+                  : 'bg-slate-50 text-slate-400 border border-slate-100'
+                  }`}
                 title={sendScreenshot ? "Screenshot enabled" : "Screenshot disabled (Saves cost)"}
               >
                 <IoCameraOutline size={14} className={sendScreenshot ? 'text-indigo-600' : 'text-slate-400'} />
@@ -801,64 +1156,73 @@ const App: React.FC = () => {
 
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-bold transition-all ${
-                  attachedImage 
-                    ? 'bg-indigo-50 text-indigo-600 border border-indigo-100' 
-                    : 'bg-slate-50 text-slate-400 border border-slate-100 hover:bg-slate-100'
-                }`}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-bold transition-all ${attachedImage
+                  ? 'bg-indigo-50 text-indigo-600 border border-indigo-100'
+                  : 'bg-slate-50 text-slate-400 border border-slate-100 hover:bg-slate-100'
+                  }`}
                 title="Attach image (mockup/inspiration)"
               >
                 <IoImageOutline size={14} className={attachedImage ? 'text-indigo-600' : 'text-slate-400'} />
                 {attachedImage ? 'Attached' : 'Image'}
               </button>
-              <input 
-                type="file" 
-                ref={fileInputRef} 
-                className="hidden" 
-                accept="image/*" 
-                onChange={handleFileChange} 
+              <input
+                type="file"
+                ref={fileInputRef}
+                className="hidden"
+                accept="image/*"
+                onChange={handleFileChange}
               />
+              <TokenDonut current={estTokens} max={MAX_TOKENS} />
             </div>
-            
+
             <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  setMessages(() => [{ role: 'assistant', content: 'Chat cleared! Initial state preserved if session started.' }])
+                  setSessionBaseline(null)
+                }}
+                className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
+                title="Clear Chat"
+              >
+                <IoTrashOutline size={18} />
+              </button>
+
               <button
                 onClick={startElementSelection}
                 disabled={loading}
-                className={`flex items-center gap-2 px-4 py-2 rounded-2xl text-[11px] font-black uppercase tracking-wider transition-all duration-300 ${
-                  selecting 
-                    ? 'bg-red-500 text-white shadow-red-200/50 shadow-xl hover:bg-red-600' 
-                    : 'bg-white text-slate-600 hover:bg-slate-200 border border-slate-200 shadow-sm active:scale-95'
-                }`}
+                className={`flex items-center gap-2 px-4 py-2 rounded-2xl text-[11px] font-black uppercase tracking-wider transition-all duration-300 ${selecting
+                  ? 'bg-red-500 text-white shadow-red-200/50 shadow-xl hover:bg-red-600'
+                  : 'bg-white text-slate-600 hover:bg-slate-200 border border-slate-200 shadow-sm active:scale-95'
+                  }`}
               >
                 <IoExpandOutline size={14} />
                 {selecting ? 'Cancel Selection' : 'Select Target'}
               </button>
-              
+
               <button
-                onClick={handleSend}
+                onClick={() => handleSend()}
                 disabled={loading || !input.trim() || selecting}
-                className={`flex items-center justify-center w-10 h-10 rounded-2xl transition-all duration-300 ${
-                  input.trim() && !loading && !selecting
-                    ? 'bg-indigo-600 text-white shadow-xl shadow-indigo-200/50 hover:bg-indigo-700 hover:-translate-y-0.5 active:translate-y-0 active:scale-90' 
-                    : 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
-                }`}
+                className={`flex items-center justify-center w-10 h-10 rounded-2xl transition-all duration-300 ${input.trim() && !loading && !selecting
+                  ? 'bg-indigo-600 text-white shadow-xl shadow-indigo-200/50 hover:bg-indigo-700 hover:-translate-y-0.5 active:translate-y-0 active:scale-90'
+                  : 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
+                  }`}
               >
                 <IoSend size={18} />
               </button>
             </div>
           </div>
         </div>
-        
+
         <div className="flex items-center justify-between text-[10px] text-slate-400 px-1">
           <div className="flex gap-2">
             <span className="flex items-center gap-1"><IoCameraOutline /> High-res Capture</span>
             <span className="flex items-center gap-1"><IoCodeSlashOutline /> Context Active</span>
           </div>
-          <button 
+          <button
             onClick={() => chrome.runtime.openOptionsPage()}
             className="hover:text-indigo-600 transition-colors uppercase font-bold tracking-tighter"
           >
-            v0.0.2
+            v0.0.3
           </button>
         </div>
       </div>

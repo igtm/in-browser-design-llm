@@ -25,10 +25,15 @@ export interface GeminiUsage {
   totalTokenCount: number
 }
 
-export interface GeminiDesignResponse {
+export interface GeminiVariation {
+  title: string
   summary: string
   operations: DOMOperation[]
-  usage: GeminiUsage
+}
+
+export interface GeminiDesignResponse {
+  variations: GeminiVariation[]
+  usage?: GeminiUsage
 }
 
 export const callGeminiDesign = async (
@@ -42,7 +47,7 @@ export const callGeminiDesign = async (
   modelName: string = 'gemini-3-flash-preview'
 ): Promise<GeminiDesignResponse> => {
   const genAI = new GoogleGenerativeAI(apiKey)
-  const model = genAI.getGenerativeModel({ 
+  const model = genAI.getGenerativeModel({
     model: modelName,
     generationConfig: {
       responseMimeType: 'application/json',
@@ -55,15 +60,20 @@ Your task is to modify the provided web page based on the user's instructions.
 
 USER INSTRUCTION: "${instruction}"
 
-Analyze the HTML and return a JSON object.
+Analyze the HTML and return a JSON object containing one or more design variations.
+If the instruction is creative or open-ended, provide 2-3 distinct variations with different styles or layouts.
+
 SCHEMA:
 {
-  "summary": string, // A concise explanation of the changes you are about to apply (in the user's language).
-  "operations": Array<{
-    "selector": string,
-    "action": "replace" | "append" | "prepend" | "setStyle" | "remove",
-    "content"?: string,
-    "styles"?: Record<string, string>
+  "variations": Array<{
+    "title": string, // A short, catchy title for this variation (e.g., "Minimalist Dark", "Vibrant & Bold").
+    "summary": string, // A concise explanation of the changes in this variation.
+    "operations": Array<{
+      "selector": string,
+      "action": "replace" | "append" | "prepend" | "setStyle" | "remove",
+      "content"?: string,
+      "styles"?: Record<string, string>
+    }>
   }>
 }
 
@@ -73,25 +83,27 @@ SCHEMA:
 2. **REPLACE ACTION**: "replace" updates the **innerHTML** of the target element. **Do NOT** include the target element's own tag in the "content", or you will create a nested duplicate (double-wrapping). Only provide the *children* nodes.
 3. **SELECTORS**: Use standard \`document.querySelector\` selectors. NO \`:has()\`. All selectors MUST be relative to the "TARGET ELEMENT" using \`:scope\`.
 4. **SPECIAL CHARACTERS**: Escape special characters in Tailwind classes (e.g., \`[\`, \`]\`, \`/\`, \`.\`) with DOUBLE BACKSLASH. Example: \`:scope .w-\\\\[50%\\\\]\`.
-5. **EXISTING ELEMENTS**: When styling or removing, ensure the selector targets an element that exists in the current HTML.
+5. **CUMULATIVE CHANGES**: The provided HTML is the **ORIGINAL state** of the page baseline. The CONVERSATION HISTORY contains all previous steps. 
+   **Your "operations" MUST be cumulative**: they should represent the final desired state of the page relative to the ORIGINAL HTML, incorporating both previous successful steps AND the current instruction.
+6. **EXISTING ELEMENTS**: When styling or removing, ensure the selector targets an element that exists in the current HTML.
 
-HTML:
+HTML (ORIGINAL BASELINE):
 ${html.substring(0, 50000)}
 
 ### CONVERSATION HISTORY & FEEDBACK:
-Below is the history of this session. If an assistant message includes "ERRORS", it means the generated selectors failed. 
-Use this feedback to correct your approach!
+Below is the history of this session. Each turn's goal adds to the previous ones.
+Your task is to provide the TOTAL set of operations to reach the final state from the ORIGINAL BASELINE.
 
 ${history.map(m => {
-  let text = `${m.role.toUpperCase()}: ${m.content}`
-  if (m.operationResults && m.operationResults.some(r => !r.success)) {
-    const errors = m.operationResults.filter(r => !r.success)
-      .map(r => `  - Selector "${r.selector}" failed: ${r.error}`)
-      .join('\n')
-    text += `\nERRORS DETECTED IN PREVIOUS TURN:\n${errors}`
-  }
-  return text
-}).join('\n\n')}
+    let text = `${m.role.toUpperCase()}: ${m.content}`
+    if (m.operationResults && m.operationResults.some(r => !r.success)) {
+      const errors = m.operationResults.filter(r => !r.success)
+        .map(r => `  - Selector "${r.selector}" failed: ${r.error}`)
+        .join('\n')
+      text += `\nERRORS DETECTED IN PREVIOUS TURN:\n${errors}`
+    }
+    return text
+  }).join('\n\n')}
 
 CURRENT USER INSTRUCTION: "${instruction}"
 `
@@ -121,50 +133,46 @@ CURRENT USER INSTRUCTION: "${instruction}"
     })
   }
 
-  
-  const result = await model.generateContent(parts)
-  const response = await result.response
-  const text = response.text()
-  
-  const usage = response.usageMetadata ? {
-    promptTokenCount: response.usageMetadata.promptTokenCount || 0,
-    candidatesTokenCount: response.usageMetadata.candidatesTokenCount || 0,
-    totalTokenCount: response.usageMetadata.totalTokenCount || 0,
-  } : {
-    promptTokenCount: 0,
-    candidatesTokenCount: 0,
-    totalTokenCount: 0,
-  };
-
-
-  let operations: DOMOperation[] = []
-  let summary = ""
   try {
-    const parsed = JSON.parse(text)
-    if (parsed.operations) {
-      operations = parsed.operations
-      summary = parsed.summary || ""
-    } else if (Array.isArray(parsed)) {
-      operations = parsed
-    }
-  } catch (e) {
-    const jsonMatch = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/)
-    if (jsonMatch) {
-      try {
-        const parsed = JSON.parse(jsonMatch[0])
-        if (parsed.operations) {
-          operations = parsed.operations
-          summary = parsed.summary || ""
-        } else if (Array.isArray(parsed)) {
-          operations = parsed
-        }
-      } catch (innerE) {
-        throw new Error('Failed to parse Gemini response as JSON.')
-      }
-    } else {
-      throw new Error('Failed to parse Gemini response as JSON operations.')
-    }
-  }
+    const result = await model.generateContent(parts)
+    const response = await result.response
+    const text = response.text()
 
-  return { summary, operations, usage }
+    const usage = response.usageMetadata ? {
+      promptTokenCount: response.usageMetadata.promptTokenCount || 0,
+      candidatesTokenCount: response.usageMetadata.candidatesTokenCount || 0,
+      totalTokenCount: response.usageMetadata.totalTokenCount || 0,
+    } : undefined
+
+    // Try parsing the response text
+    try {
+      const parsed = JSON.parse(text)
+      if (parsed.variations && Array.isArray(parsed.variations)) {
+        return { variations: parsed.variations, usage }
+      } else if (Array.isArray(parsed)) {
+        return { variations: parsed, usage }
+      } else {
+        // Fallback for single object responses
+        return {
+          variations: [{
+            title: parsed.title || "Generated Design",
+            summary: parsed.summary || "",
+            operations: parsed.operations || []
+          }],
+          usage
+        }
+      }
+    } catch (e) {
+      // JSON mode should prevent this, but just in case
+      const jsonMatch = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/)
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0])
+        if (parsed.variations) return { variations: parsed.variations, usage }
+        return { variations: [parsed], usage }
+      }
+      throw new Error('Failed to parse Gemini response as JSON.')
+    }
+  } catch (err: any) {
+    throw new Error(`Gemini API Error: ${err.message}`)
+  }
 }
