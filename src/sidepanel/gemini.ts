@@ -42,7 +42,7 @@ export const callGeminiDesign = async (
   modelName: string = 'gemini-3-flash-preview'
 ): Promise<GeminiDesignResponse> => {
   const genAI = new GoogleGenerativeAI(apiKey)
-  const model = genAI.getGenerativeModel({ 
+  const model = genAI.getGenerativeModel({
     model: modelName,
     generationConfig: {
       responseMimeType: 'application/json',
@@ -73,25 +73,27 @@ SCHEMA:
 2. **REPLACE ACTION**: "replace" updates the **innerHTML** of the target element. **Do NOT** include the target element's own tag in the "content", or you will create a nested duplicate (double-wrapping). Only provide the *children* nodes.
 3. **SELECTORS**: Use standard \`document.querySelector\` selectors. NO \`:has()\`. All selectors MUST be relative to the "TARGET ELEMENT" using \`:scope\`.
 4. **SPECIAL CHARACTERS**: Escape special characters in Tailwind classes (e.g., \`[\`, \`]\`, \`/\`, \`.\`) with DOUBLE BACKSLASH. Example: \`:scope .w-\\\\[50%\\\\]\`.
-5. **EXISTING ELEMENTS**: When styling or removing, ensure the selector targets an element that exists in the current HTML.
+5. **CUMULATIVE CHANGES**: The provided HTML is the **ORIGINAL state** of the page baseline. The CONVERSATION HISTORY contains all previous steps. 
+   **Your "operations" MUST be cumulative**: they should represent the final desired state of the page relative to the ORIGINAL HTML, incorporating both previous successful steps AND the current instruction.
+6. **EXISTING ELEMENTS**: When styling or removing, ensure the selector targets an element that exists in the current HTML.
 
-HTML:
+HTML (ORIGINAL BASELINE):
 ${html.substring(0, 50000)}
 
 ### CONVERSATION HISTORY & FEEDBACK:
-Below is the history of this session. If an assistant message includes "ERRORS", it means the generated selectors failed. 
-Use this feedback to correct your approach!
+Below is the history of this session. Each turn's goal adds to the previous ones.
+Your task is to provide the TOTAL set of operations to reach the final state from the ORIGINAL BASELINE.
 
 ${history.map(m => {
-  let text = `${m.role.toUpperCase()}: ${m.content}`
-  if (m.operationResults && m.operationResults.some(r => !r.success)) {
-    const errors = m.operationResults.filter(r => !r.success)
-      .map(r => `  - Selector "${r.selector}" failed: ${r.error}`)
-      .join('\n')
-    text += `\nERRORS DETECTED IN PREVIOUS TURN:\n${errors}`
-  }
-  return text
-}).join('\n\n')}
+    let text = `${m.role.toUpperCase()}: ${m.content}`
+    if (m.operationResults && m.operationResults.some(r => !r.success)) {
+      const errors = m.operationResults.filter(r => !r.success)
+        .map(r => `  - Selector "${r.selector}" failed: ${r.error}`)
+        .join('\n')
+      text += `\nERRORS DETECTED IN PREVIOUS TURN:\n${errors}`
+    }
+    return text
+  }).join('\n\n')}
 
 CURRENT USER INSTRUCTION: "${instruction}"
 `
@@ -121,11 +123,11 @@ CURRENT USER INSTRUCTION: "${instruction}"
     })
   }
 
-  
+
   const result = await model.generateContent(parts)
   const response = await result.response
   const text = response.text()
-  
+
   const usage = response.usageMetadata ? {
     promptTokenCount: response.usageMetadata.promptTokenCount || 0,
     candidatesTokenCount: response.usageMetadata.candidatesTokenCount || 0,
