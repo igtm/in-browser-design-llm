@@ -25,10 +25,15 @@ export interface GeminiUsage {
   totalTokenCount: number
 }
 
-export interface GeminiDesignResponse {
+export interface GeminiVariation {
+  title: string
   summary: string
   operations: DOMOperation[]
-  usage: GeminiUsage
+}
+
+export interface GeminiDesignResponse {
+  variations: GeminiVariation[]
+  usage?: GeminiUsage
 }
 
 export const callGeminiDesign = async (
@@ -55,15 +60,20 @@ Your task is to modify the provided web page based on the user's instructions.
 
 USER INSTRUCTION: "${instruction}"
 
-Analyze the HTML and return a JSON object.
+Analyze the HTML and return a JSON object containing one or more design variations.
+If the instruction is creative or open-ended, provide 2-3 distinct variations with different styles or layouts.
+
 SCHEMA:
 {
-  "summary": string, // A concise explanation of the changes you are about to apply (in the user's language).
-  "operations": Array<{
-    "selector": string,
-    "action": "replace" | "append" | "prepend" | "setStyle" | "remove",
-    "content"?: string,
-    "styles"?: Record<string, string>
+  "variations": Array<{
+    "title": string, // A short, catchy title for this variation (e.g., "Minimalist Dark", "Vibrant & Bold").
+    "summary": string, // A concise explanation of the changes in this variation.
+    "operations": Array<{
+      "selector": string,
+      "action": "replace" | "append" | "prepend" | "setStyle" | "remove",
+      "content"?: string,
+      "styles"?: Record<string, string>
+    }>
   }>
 }
 
@@ -123,50 +133,46 @@ CURRENT USER INSTRUCTION: "${instruction}"
     })
   }
 
-
-  const result = await model.generateContent(parts)
-  const response = await result.response
-  const text = response.text()
-
-  const usage = response.usageMetadata ? {
-    promptTokenCount: response.usageMetadata.promptTokenCount || 0,
-    candidatesTokenCount: response.usageMetadata.candidatesTokenCount || 0,
-    totalTokenCount: response.usageMetadata.totalTokenCount || 0,
-  } : {
-    promptTokenCount: 0,
-    candidatesTokenCount: 0,
-    totalTokenCount: 0,
-  };
-
-
-  let operations: DOMOperation[] = []
-  let summary = ""
   try {
-    const parsed = JSON.parse(text)
-    if (parsed.operations) {
-      operations = parsed.operations
-      summary = parsed.summary || ""
-    } else if (Array.isArray(parsed)) {
-      operations = parsed
-    }
-  } catch (e) {
-    const jsonMatch = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/)
-    if (jsonMatch) {
-      try {
-        const parsed = JSON.parse(jsonMatch[0])
-        if (parsed.operations) {
-          operations = parsed.operations
-          summary = parsed.summary || ""
-        } else if (Array.isArray(parsed)) {
-          operations = parsed
-        }
-      } catch (innerE) {
-        throw new Error('Failed to parse Gemini response as JSON.')
-      }
-    } else {
-      throw new Error('Failed to parse Gemini response as JSON operations.')
-    }
-  }
+    const result = await model.generateContent(parts)
+    const response = await result.response
+    const text = response.text()
 
-  return { summary, operations, usage }
+    const usage = response.usageMetadata ? {
+      promptTokenCount: response.usageMetadata.promptTokenCount || 0,
+      candidatesTokenCount: response.usageMetadata.candidatesTokenCount || 0,
+      totalTokenCount: response.usageMetadata.totalTokenCount || 0,
+    } : undefined
+
+    // Try parsing the response text
+    try {
+      const parsed = JSON.parse(text)
+      if (parsed.variations && Array.isArray(parsed.variations)) {
+        return { variations: parsed.variations, usage }
+      } else if (Array.isArray(parsed)) {
+        return { variations: parsed, usage }
+      } else {
+        // Fallback for single object responses
+        return {
+          variations: [{
+            title: parsed.title || "Generated Design",
+            summary: parsed.summary || "",
+            operations: parsed.operations || []
+          }],
+          usage
+        }
+      }
+    } catch (e) {
+      // JSON mode should prevent this, but just in case
+      const jsonMatch = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/)
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0])
+        if (parsed.variations) return { variations: parsed.variations, usage }
+        return { variations: [parsed], usage }
+      }
+      throw new Error('Failed to parse Gemini response as JSON.')
+    }
+  } catch (err: any) {
+    throw new Error(`Gemini API Error: ${err.message}`)
+  }
 }

@@ -1,18 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { IoSend, IoSparkles, IoCameraOutline, IoCodeSlashOutline, IoSettingsOutline, IoExpandOutline, IoCloseCircleOutline, IoTimeOutline, IoChatbubbleEllipsesOutline, IoRefreshOutline, IoTrashOutline, IoCopyOutline, IoCheckmarkOutline, IoWarningOutline, IoImageOutline } from 'react-icons/io5'
-import { callGeminiDesign, DOMOperation, GeminiUsage } from './gemini'
+import { callGeminiDesign, DOMOperation, GeminiUsage, GeminiVariation } from './gemini'
 
 interface Message {
   role: 'user' | 'assistant' | 'system'
   content: string
-  summary?: string
   attachedImage?: string
   type?: 'error' | 'info'
+  variations?: GeminiVariation[] // Multi-variation support
+  // Legacy fields for backward compatibility/system messages
+  summary?: string
   operations?: DOMOperation[]
   undoOperations?: DOMOperation[]
   operationResults?: { selector: string, success: boolean, error?: string }[]
   rootSelector?: string
   usage?: GeminiUsage
+  suggestions?: string[] // Clickable prompt suggestions
 }
 
 interface ChatSession {
@@ -28,9 +31,11 @@ interface HistoryItem {
   timestamp: number
   url: string
   instruction: string
-  summary?: string
+  variations?: GeminiVariation[] // Multi-variation support
   attachedImage?: string
-  operations: DOMOperation[]
+  // Legacy fields
+  summary?: string
+  operations?: DOMOperation[]
   undoOperations?: DOMOperation[]
   operationResults?: { selector: string, success: boolean, error?: string }[]
   rootSelector?: string
@@ -123,10 +128,43 @@ const TokenDonut: React.FC<{ current: number, max: number }> = ({ current, max }
   )
 }
 
+const VariationCard: React.FC<{
+  variation: GeminiVariation,
+  onApply: () => void,
+  isApplied: boolean,
+  loading: boolean
+}> = ({ variation, onApply, isApplied, loading }) => {
+  return (
+    <div className={`p-4 rounded-2xl border transition-all duration-300 w-64 flex-shrink-0 ${isApplied
+      ? 'bg-indigo-50 border-indigo-200 shadow-md ring-2 ring-indigo-500 ring-offset-2'
+      : 'bg-white border-slate-200 hover:border-indigo-300 hover:shadow-lg'
+      }`}>
+      <div className="flex items-center justify-between mb-2">
+        <h4 className="text-sm font-bold text-slate-800 line-clamp-1">{variation.title}</h4>
+        {isApplied && <span className="text-[10px] font-bold text-indigo-600 bg-indigo-100 px-2 py-0.5 rounded-full uppercase">Applied</span>}
+      </div>
+      <p className="text-[11px] text-slate-500 mb-4 line-clamp-3 leading-relaxed">
+        {variation.summary}
+      </p>
+      <button
+        onClick={onApply}
+        disabled={loading}
+        className={`w-full py-2 rounded-xl text-xs font-bold transition-all ${isApplied
+          ? 'bg-rose-50 text-rose-600 border border-rose-200 hover:bg-rose-100 active:scale-95'
+          : 'bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 shadow-lg shadow-indigo-100'
+          }`}
+      >
+        {isApplied ? 'Undo Design' : 'Apply Design'}
+      </button>
+    </div>
+  )
+}
+
 const App: React.FC = () => {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [apiKey, setApiKey] = useState('')
+  const [modelName, setModelName] = useState('gemini-2.0-flash-exp')
   const [selectedElement, setSelectedElement] = useState<{ selector: string, html: string } | null>(null)
   const [selecting, setSelecting] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -138,11 +176,21 @@ const App: React.FC = () => {
   const [activeUrl, setActiveUrl] = useState('')
   const [attachedImage, setAttachedImage] = useState<string | null>(null)
 
+  const DEFAULT_SUGGESTIONS = [
+    'Give me 3 creative variations to make this page look more modern and premium',
+    'Improve the current design by refining the typography and layout for a professional look',
+    'Transform this page into a sleek dark mode theme with neon accents'
+  ]
+
   const [sessions, setSessions] = useState<ChatSession[]>([
     {
       id: 'default',
       name: 'Chat 1',
-      messages: [{ role: 'assistant', content: 'Hello! I can help you design this page. Give me an instruction!' }],
+      messages: [{
+        role: 'assistant',
+        content: 'Hello! I can help you design this page. Give me an instruction!',
+        suggestions: DEFAULT_SUGGESTIONS
+      }],
       sessionBaseline: null,
       estTokens: 0
     }
@@ -157,6 +205,7 @@ const App: React.FC = () => {
   const MAX_TOKENS = 1000000
   const MAX_SESSIONS = 6
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [appliedVariationId, setAppliedVariationId] = useState<string | null>(null)
 
   const loadSettings = () => {
     chrome.storage.local.get(['geminiApiKey', 'history', 'sendScreenshot', 'filterByDomain', 'sessions', 'activeSessionId'], (result) => {
@@ -166,18 +215,27 @@ const App: React.FC = () => {
       if (result.filterByDomain !== undefined) setFilterByDomain(result.filterByDomain as boolean)
       if (result.sessions) setSessions(result.sessions as ChatSession[])
       if (result.activeSessionId) setActiveSessionId(result.activeSessionId as string)
+      if (result.geminiModelName) setModelName(result.geminiModelName as string)
     })
   }
 
-  const updateActiveSession = (update: Partial<ChatSession>) => {
-    const newSessions = sessions.map(s => s.id === activeSessionId ? { ...s, ...update } : s)
-    setSessions(newSessions)
-    chrome.storage.local.set({ sessions: newSessions })
+  const updateActiveSession = (update: Partial<ChatSession> | ((prev: ChatSession) => ChatSession)) => {
+    setSessions(prev => {
+      const newSessions = prev.map(s => {
+        if (s.id === activeSessionId) {
+          return typeof update === 'function' ? update(s) : { ...s, ...update }
+        }
+        return s
+      })
+      return newSessions
+    })
   }
 
   const setMessages = (updateFn: (prev: Message[]) => Message[]) => {
-    const newMessages = updateFn(messages)
-    updateActiveSession({ messages: newMessages })
+    updateActiveSession(prev => ({
+      ...prev,
+      messages: updateFn(prev.messages)
+    }))
   }
 
   const setSessionBaseline = (baseline: { html: string, screenshot: string | null } | null) => {
@@ -194,15 +252,24 @@ const App: React.FC = () => {
     const newSession: ChatSession = {
       id: newId,
       name: `Chat ${sessions.length + 1}`,
-      messages: [{ role: 'assistant', content: 'Hello! I can help you design this page. Give me an instruction!' }],
+      messages: [{
+        role: 'assistant',
+        content: 'Hello! I can help you design this page. Give me an instruction!',
+        suggestions: DEFAULT_SUGGESTIONS
+      }],
       sessionBaseline: null,
       estTokens: 0
     }
     const newSessions = [...sessions, newSession]
     setSessions(newSessions)
     setActiveSessionId(newId)
-    chrome.storage.local.set({ sessions: newSessions, activeSessionId: newId })
   }
+
+  useEffect(() => {
+    if (sessions.length > 0) {
+      chrome.storage.local.set({ sessions, activeSessionId })
+    }
+  }, [sessions, activeSessionId])
 
   const deleteSession = (id: string, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -253,6 +320,12 @@ const App: React.FC = () => {
     })
 
     const handleStorageChange = (changes: { [key: string]: chrome.storage.StorageChange }) => {
+      if (changes.geminiModelName?.newValue) {
+        setModelName(changes.geminiModelName.newValue as string);
+      }
+      if (changes.geminiApiKey?.newValue) {
+        setApiKey(changes.geminiApiKey.newValue as string);
+      }
       if (changes.selectedElement?.newValue) {
         const data = changes.selectedElement.newValue as { selector: string, html: string };
         setSelectedElement({ selector: data.selector, html: data.html });
@@ -403,7 +476,7 @@ const App: React.FC = () => {
         }
         return { fullHtml, targetHtml }
       },
-      args: [selectedElement?.selector]
+      args: [selectedElement?.selector || ""]
     })
 
     const { fullHtml, targetHtml } = results[0].result as { fullHtml: string, targetHtml: string | null }
@@ -507,7 +580,7 @@ const App: React.FC = () => {
         })
         return { undoOps, results }
       },
-      args: [ops, rootSelector],
+      args: [ops, rootSelector || ""],
     })
     return (response[0].result as { undoOps: DOMOperation[], results: any[] }) || { undoOps: [], results: [] }
   }
@@ -533,8 +606,14 @@ const App: React.FC = () => {
     })
   }
 
-  const handleSend = async () => {
-    if (!input.trim() || !apiKey) return
+  const handleSuggestionSend = (suggestion: string) => {
+    setInput(suggestion)
+    handleSend(suggestion)
+  }
+
+  const handleSend = async (overrideInput?: string) => {
+    const userMsg = (overrideInput || input).trim()
+    if (!userMsg || !apiKey) return
 
     // 1M Token Limit Check
     if (estTokens > MAX_TOKENS) {
@@ -546,7 +625,6 @@ const App: React.FC = () => {
       return
     }
 
-    const userMsg = input.trim()
     const currentAttachedImage = attachedImage
     setInput('')
     setAttachedImage(null)
@@ -563,9 +641,8 @@ const App: React.FC = () => {
         setSessionBaseline(currentBaseline)
       }
 
-      const result = await chrome.storage.local.get(['customSystemPrompt', 'geminiModelName'])
+      const result = await chrome.storage.local.get(['customSystemPrompt'])
       const customPrompt = result.customSystemPrompt as string | undefined
-      const modelName = result.geminiModelName as string | undefined
 
       const historyForGemini: any[] = messages
         .filter(m => m.role === 'user' || m.role === 'assistant')
@@ -576,7 +653,7 @@ const App: React.FC = () => {
         }))
 
       // Gemini now receives the BASELINE HTML and the full history
-      const { operations, usage, summary } = await callGeminiDesign(
+      const { variations, usage } = await callGeminiDesign(
         apiKey,
         currentBaseline.html,
         currentBaseline.screenshot,
@@ -587,30 +664,10 @@ const App: React.FC = () => {
         modelName
       )
 
-      // Before applying NEW cumulative operations, revert to baseline if there was a previous state
-      const lastAssistantMsg = [...messages].reverse().find(m => m.role === 'assistant' && m.undoOperations && m.undoOperations.length > 0)
-      if (lastAssistantMsg && lastAssistantMsg.undoOperations) {
-        await applyOperations(lastAssistantMsg.undoOperations, lastAssistantMsg.rootSelector)
-      }
-
-      const { undoOps, results } = await applyOperations(operations, selectedElement?.selector)
-      saveToHistory(userMsg, operations, undoOps, selectedElement?.selector, usage, results, summary, currentAttachedImage)
-      const hasErrors = results.some(r => !r.success)
-
-      if (hasErrors) {
-        console.error('[In-Browser Design] Some operations failed:', results.filter(r => !r.success))
-      }
-
       setMessages(prev => [...prev, {
         role: 'assistant',
-        content: hasErrors
-          ? `Applied ${results.filter(r => r.success).length}/${operations.length} changes. Some operations failed.`
-          : summary || `Applied ${operations.length} changes to the page!`,
-        summary: summary,
-        operations: operations,
-        undoOperations: undoOps,
-        operationResults: results,
-        rootSelector: selectedElement?.selector,
+        content: `I've generated ${variations.length} design variation${variations.length > 1 ? 's' : ''} for you.`,
+        variations: variations,
         usage: usage
       }])
     } catch (err: any) {
@@ -619,6 +676,61 @@ const App: React.FC = () => {
         type: 'error',
         content: `Error: ${err.message}`
       }])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleApplyVariation = async (msgIndex: number, variationIndex: number) => {
+    const msg = messages[msgIndex]
+    if (!msg || !msg.variations) return
+    const variation = msg.variations[variationIndex]
+    if (!variation) return
+
+    const isCurrentlyApplied = appliedVariationId === `${msgIndex}-${variationIndex}`
+
+    setLoading(true)
+    try {
+      if (isCurrentlyApplied) {
+        // UNDO PATH
+        if (msg.undoOperations) {
+          await applyOperations(msg.undoOperations, msg.rootSelector)
+        }
+
+        // Clear metadata from message
+        setMessages(prev => prev.map((m, i) => i === msgIndex ? {
+          ...m,
+          undoOperations: undefined,
+          operationResults: undefined,
+          rootSelector: undefined
+        } : m))
+
+        setAppliedVariationId(null)
+      } else {
+        // APPLY PATH
+        // 1. Revert previous state if any
+        const lastAppliedMsg = [...messages].reverse().find(m => m.role === 'assistant' && m.undoOperations && m.undoOperations.length > 0)
+        if (lastAppliedMsg && lastAppliedMsg.undoOperations) {
+          await applyOperations(lastAppliedMsg.undoOperations, lastAppliedMsg.rootSelector)
+        }
+
+        // 2. Apply new operations
+        const { undoOps, results } = await applyOperations(variation.operations, selectedElement?.selector)
+
+        // 3. Update history and message state
+        setMessages(prev => prev.map((m, i) => i === msgIndex ? {
+          ...m,
+          undoOperations: undoOps,
+          operationResults: results,
+          rootSelector: selectedElement?.selector
+        } : m))
+
+        setAppliedVariationId(`${msgIndex}-${variationIndex}`)
+
+        saveToHistory(activeSession.messages[msgIndex - 1]?.content || 'Design Update', variation.operations, undoOps, selectedElement?.selector, msg.usage, results, variation.summary, activeSession.messages[msgIndex - 1]?.attachedImage)
+      }
+    } catch (err: any) {
+      console.error('Failed to handle variation:', err)
     } finally {
       setLoading(false)
     }
@@ -769,6 +881,35 @@ const App: React.FC = () => {
                     </div>
                   )}
                   {msg.content}
+
+                  {msg.suggestions && msg.suggestions.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mt-4">
+                      {msg.suggestions.map((suggestion, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => handleSuggestionSend(suggestion)}
+                          className="bg-white/80 hover:bg-white text-indigo-600 border border-indigo-100 px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all shadow-sm active:scale-95"
+                        >
+                          {suggestion}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {msg.variations && msg.variations.length > 0 && (
+                    <div className="flex gap-4 mt-4 overflow-x-auto pb-4 no-scrollbar -mx-2 px-2">
+                      {msg.variations.map((v, vIdx) => (
+                        <VariationCard
+                          key={vIdx}
+                          variation={v}
+                          isApplied={appliedVariationId === `${i}-${vIdx}`}
+                          loading={loading}
+                          onApply={() => handleApplyVariation(i, vIdx)}
+                        />
+                      ))}
+                    </div>
+                  )}
+
                   {msg.usage && <UsageStats usage={msg.usage} />}
                 </div>
                 {msg.operations && (
@@ -813,7 +954,7 @@ const App: React.FC = () => {
               <div className="flex justify-start">
                 <div className="bg-white border border-slate-200 px-4 py-2 rounded-2xl shadow-sm animate-pulse flex items-center gap-2 text-slate-400 text-sm">
                   <IoSparkles className="animate-spin" />
-                  Thinking...
+                  Thinking... <span className="text-[10px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{modelName}</span>
                 </div>
               </div>
             )}
@@ -894,7 +1035,8 @@ const App: React.FC = () => {
                   <div className="mt-3 flex gap-2">
                     <button
                       onClick={async () => {
-                        const { results } = await applyOperations(item.operations, item.rootSelector)
+                        const ops = item.variations && item.variations.length > 0 ? item.variations[0].operations : (item.operations || [])
+                        const { results } = await applyOperations(ops, item.rootSelector)
 
                         // Also show a temporary system message and log to console if there are errors
                         if (results.some(r => !r.success)) {
@@ -1058,7 +1200,7 @@ const App: React.FC = () => {
               </button>
 
               <button
-                onClick={handleSend}
+                onClick={() => handleSend()}
                 disabled={loading || !input.trim() || selecting}
                 className={`flex items-center justify-center w-10 h-10 rounded-2xl transition-all duration-300 ${input.trim() && !loading && !selecting
                   ? 'bg-indigo-600 text-white shadow-xl shadow-indigo-200/50 hover:bg-indigo-700 hover:-translate-y-0.5 active:translate-y-0 active:scale-90'
@@ -1080,7 +1222,7 @@ const App: React.FC = () => {
             onClick={() => chrome.runtime.openOptionsPage()}
             className="hover:text-indigo-600 transition-colors uppercase font-bold tracking-tighter"
           >
-            v0.0.2
+            v0.0.3
           </button>
         </div>
       </div>
